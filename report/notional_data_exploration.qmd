@@ -1,0 +1,56 @@
+---
+title: "Notional Data Exploration"
+format: html
+editor: visual
+jupyter: python3
+---
+
+```{r}
+#| include: FALSE
+
+setwd(here::here())
+library(sf)
+library(tidyverse)
+
+input <- readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', 'address_list') %>% 
+  arrange(id) %>%
+  mutate(address = str_replace_all(URLdecode(address), '\\+', ' '))
+output <- list(
+  postgis = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'postgis_responses') %>% arrange(id),
+    degauss = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'degauss_responses') %>% arrange(id),
+    nominatim = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'nominatim_responses') %>% arrange(id) 
+)
+```
+
+## Notional Data 
+
+### Input
+
+The input data set contains a variety of public place addresses with verified locations.
+
+```{r}
+head(input)
+```
+
+### Output
+
+Input data was geocoded with three different geocoders:
+
+#### Degauss
+
+```{r}
+
+head(output$degauss)
+```
+
+#### PostGIS
+
+```{r}
+head(output$postgis)
+```
+
+#### Nominatim
+
+```{r}
+head(output$nominatim)
+```
