@@ -8,25 +8,81 @@ jupyter: python3
 ```{r}
 #| include: FALSE
 
-setwd(here::here())
 library(sf)
 library(tidyverse)
+library(kableExtra)
 
-input <- readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', 'address_list') %>% 
-  arrange(id) %>%
-  mutate(address = str_replace_all(URLdecode(address), '\\+', ' '))
+input <- read_csv('data/clad_omop_degauss_simulated_input_old.csv') %>%
+  rename(Location_id = id) %>%
+  mutate(id = row_number() - 1) %>%
+  inner_join(
+    read_csv('data/OMOP_sample_simulated_residential.csv'), 
+    by = 'Location_id'
+  )
 output <- list(
-  postgis = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'postgis_responses') %>% arrange(id),
-    degauss = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'degauss_responses') %>% arrange(id),
-    nominatim = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'nominatim_responses') %>% arrange(id) 
-)
+  postgis = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'postgis_responses') %>% 
+    transmute(
+      id, 
+      rating_postgis = rating,
+      lat_gc = geo_lat,
+      long_gc = geo_long
+    ) %>%
+    group_by(id) %>%
+    mutate(result_postgis = row_number()),
+    degauss = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'degauss_responses') %>% 
+    transmute(
+      id, 
+      score_degauss = geo_score,
+      precision_degauss = geo_precision,
+      lat_gc = geo_lat,
+      long_gc = lon
+    ) %>%
+    group_by(id) %>%
+    mutate(result_degauss = row_number()),
+    nominatim = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'nominatim_responses')  %>% 
+    transmute(
+      id, 
+      type_gc = geo_type,
+      lat_gc = as.numeric(geo_lat),
+      long_gc = as.numeric(geo_long),
+    ) %>%
+    group_by(id) %>%
+    mutate(result_nominatim = row_number())
+) %>%
+  map(st_as_sf, coords = c('long_gc', 'lat_gc'), crs = 4326, remove = FALSE, na.fail = FALSE)
+
+output_long <- output %>% 
+  bind_rows(.id = "geocoder") 
+compare <- input %>%
+  select(
+    id, 
+    state_abbr, 
+    address_type, 
+    location_source_value, 
+    lat_input = latitude, 
+    long_input = longitude
+  ) %>% 
+  expand_grid(geocoder = c('postgis', 'degauss', 'nominatim')) %>% 
+  left_join(output_long, by = c('id', 'geocoder')) %>% 
+  mutate(failure = is.na(lat_gc) | is.na(long_gc)) %>% 
+  arrange(id, geocoder)
+
+compare$geometry_true <- st_as_sf(as.data.frame(compare), coords = c("long_input","lat_input"), crs = 4326)$geometry
+
+compare <- compare %>% mutate(
+    gc_diff_m = as.numeric(st_distance(geometry, geometry_true, by_element = TRUE))
+  )
+
+write_csv(compare, 'data/geocode_comparison_clean.csv')
 ```
 
-## Notional Data 
+## Notional Data
 
 ### Input
 
 The input data set contains a variety of public place addresses with verified locations.
+
+The output is indexed by the row order of the file that was input into it. That is the `id` field shown in any of these outputs.
 
 ```{r}
 head(input)
@@ -53,4 +109,34 @@ head(output$postgis)
 
 ```{r}
 head(output$nominatim)
+```
+
+### Performance by Geocoder
+
+Summarize by Geocoder (by both best and worst results by address).
+
+```{r}
+compare %>%
+  group_by(geocoder, id) %>%
+  summarize(
+    best_gc_distance = if_else(!all(is.na(gc_diff_m)), min(gc_diff_m, na.rm=TRUE), NA_real_),
+    worst_gc_distance = if_else(!all(is.na(gc_diff_m)), max(gc_diff_m, na.rm=TRUE), NA_real_), 
+    spread_gc_distance = worst_gc_distance - best_gc_distance,
+    address_gc_count = n() 
+  ) %>%
+  ungroup() %>% 
+  group_by(geocoder) %>%
+  summarize(
+    best_min = min(best_gc_distance, na.rm=TRUE), 
+    best_mean = mean(best_gc_distance, na.rm=TRUE), 
+    best_median = median(best_gc_distance, na.rm=TRUE), 
+    best_max = max(best_gc_distance, na.rm=TRUE), 
+    worst_min = min(worst_gc_distance, na.rm=TRUE), 
+    worst_mean = mean(worst_gc_distance, na.rm=TRUE), 
+    worst_median = median(worst_gc_distance, na.rm=TRUE), 
+    worst_max = max(worst_gc_distance, na.rm=TRUE), 
+    biggest_spread = max(spread_gc_distance, na.rm=TRUE),
+    mean_spread = mean(spread_gc_distance, na.rm = TRUE)
+  ) %>%
+  kable()
 ```
