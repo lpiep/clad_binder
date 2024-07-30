@@ -10,16 +10,16 @@ execute:
 ---
 
 ```{r}
-#| include: FALSE
+#| include: false
 
 library(sf)
 library(tidyverse)
 library(mapview)
-library(skimr)
 library(kableExtra)
 library(glue)
 
 theme_set(theme_minimal())
+setwd(here::here())
 
 input <- read_csv('data/clad_omop_degauss_simulated_input_old.csv') %>%
   rename(Location_id = id) %>%
@@ -195,11 +195,11 @@ ggplot(compare) +
   ggtitle("Error by Geocoder", subtitle = "Error Truncated to 1000m")
 ```
 
-### Geocode Confidence Ratings
+## Geocode Confidence Ratings
 
 Two of the geocoders, PostGIS, and Degauss, provide some diagnostic information about their confidence in the geocode. We would like to know if those are actually predictive of the geocode's accuracy.
 
-#### PostGIS
+### PostGIS
 
 PostGIS provides a numerical rating from 0 to 100, with zero being the most confident.
 
@@ -225,7 +225,7 @@ ggplot(filter(compare, geocoder == 'postgis')) +
 
 There is not an obvious visual relationship between the geocoding error and the geocode rating. A cursory web search did not reveal a definition for the rating.
 
-#### Degauss
+### Degauss
 
 Degauss provides a "precision" value ("street", "range", or "zip" in the notional data) and a "score" value. Scores are only comparable within precision groups per the Degauss docs. They define the score as:
 
@@ -253,11 +253,11 @@ ggplot(filter(compare, geocoder == 'degauss' & precision_degauss != 'zip')) +
   ggtitle("Error vs. Geocode Score", subtitle = "Truncated to 1000 m")
 ```
 
-#### Nominatim
+### Nominatim
 
 Nominatim results did not include any sort of confidence score to evaluate.
 
-### Multiple Results
+## Multiple Results
 
 PostGIS only ever returned a single response.
 
@@ -265,7 +265,7 @@ Degauss returns multiple results when their geocode score is tied. This occurred
 
 Nominatim is much more likely to return multiple results, and does not provide an obvious way to rank them.
 
-#### Degauss
+### Degauss
 
 Of the nine addresses for which Degauss returned multiple tied geocodes, only one address had more than two geocodes. Since they are tied, there's not an obvious way to pick between them.
 
@@ -300,11 +300,11 @@ compare %>%
 
 It seems reasonable to either pick the centroid of ties, or pick one at random. Or a tied result could be a cue for us to fall back on another geocoder.
 
-#### Nominatim
+### Nominatim
 
 As mentioned above, Nominatim returned multiple results a whopping 25% of the time, and it does not provide any way to rank their accuracy.
 
-Here are the three worst cases of the Nominatim geocoder (as measured by the size of the maximum inscribed circle containing all results). The "true" location is shown in blue, and the attempts at geocoding in red.
+Here are the three worst cases of the Nominatim geocoder (as measured by the area of by the polygon they form). The "true" location is shown in blue, and the attempts at geocoding in red.
 
 ```{r}
 baddies <- output_long %>% 
@@ -325,23 +325,23 @@ baddies <- compare %>%
   group_split()
 ```
 
-\`{r} cat(unique(baddies\[\[1\]\]\$location_source_value))\`
+`r unique(baddies[[1]]$location_source_value)`
 
 ```{r}
 mapview(baddies[[1]]$geometry, col.regions = 'red') + 
   mapview(baddies[[1]]$geometry_true)
 ```
 
-\`{r} cat(unique(baddies\[\[2\]\]\$location_source_value))\`
+`r unique(baddies[[2]]$location_source_value)`
 
 ```{r}
 mapview(baddies[[2]]$geometry, col.regions = 'red') + 
   mapview(baddies[[2]]$geometry_true)
 ```
 
-\`{r} cat(unique(baddies\[\[1\]\]\$location_source_value))\`
+`r unique(baddies[[3]]$location_source_value)`
 
 ```{r}
-mapview(baddies[[2]]$geometry, col.regions = 'red') + 
-  mapview(baddies[[2]]$geometry_true)
+mapview(baddies[[3]]$geometry, col.regions = 'red') + 
+  mapview(baddies[[3]]$geometry_true)
 ```
