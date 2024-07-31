@@ -229,7 +229,7 @@ ggplot(filter(compare, geocoder == 'postgis')) +
 ggplot(filter(compare, geocoder == 'postgis')) + 
   geom_point(aes(x = rating_postgis, y = gc_diff_m)) +
   scale_y_continuous(trans = 'log10') +
-  ylab('Log Distance from Gold Standard (m)') +   
+  ylab('Distance from Gold Standard (m)') +   
   xlab('Geocode Rating') + 
     ggtitle("Error vs. Geocode Rating - Log Scale")
 ```
@@ -259,7 +259,7 @@ ggplot(filter(compare, geocoder == 'degauss' & precision_degauss != 'zip')) +
   geom_point(aes(x = score_degauss, y = gc_diff_m)) +
   scale_y_continuous(trans = 'log10') + 
   facet_wrap(~precision_degauss) + 
-  ylab('Log Distance from Gold Standard (m)') +   
+  ylab('Distance from Gold Standard (m)') +   
   xlab('Geocode Score') + 
   ggtitle("Error vs. Geocode Score - Log Scale")
 ```
