@@ -22,21 +22,21 @@ library(glue)
 theme_set(theme_minimal())
 setwd(here::here())
 
-input <- read_csv('data/clad_omop_degauss_simulated_input_old.csv') %>%
+input <- read_csv('data/v1/clad_omop_degauss_simulated_input_old.csv') %>%
   rename(Location_id = id) %>%
   mutate(id = row_number() - 1) %>%
   inner_join(
-    read_csv('data/OMOP_sample_simulated_residential.csv'), 
+    read_csv('data/v1/OMOP_sample_simulated_residential.csv'), 
     by = 'Location_id'
   )
 raw_output <- list(
-  postgis = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'postgis_responses', col_types = 'text'),
-  degauss = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'degauss_responses', col_types = 'text'),
-  nominatim = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'nominatim_responses', col_types = 'text')
+  postgis = readxl::read_excel('data/v1/clad_omop_simulated_output_4.xlsx', sheet = 'postgis_responses', col_types = 'text'),
+  degauss = readxl::read_excel('data/v1/clad_omop_simulated_output_4.xlsx', sheet = 'degauss_responses', col_types = 'text'),
+  nominatim = readxl::read_excel('data/v1/clad_omop_simulated_output_4.xlsx', sheet = 'nominatim_responses', col_types = 'text')
 ) %>% map(select, -c(matches('json')))
 
 output <- list(
-  postgis = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'postgis_responses') %>% 
+  postgis = readxl::read_excel('data/v1/clad_omop_simulated_output_4.xlsx', sheet = 'postgis_responses') %>% 
     transmute(
       id, 
       rating_postgis = rating,
@@ -45,7 +45,7 @@ output <- list(
     ) %>%
     group_by(id) %>%
     mutate(result_postgis = row_number()),
-    degauss = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'degauss_responses') %>% 
+    degauss = readxl::read_excel('data/v1/clad_omop_simulated_output_4.xlsx', sheet = 'degauss_responses') %>% 
     transmute(
       id, 
       score_degauss = geo_score,
@@ -56,7 +56,7 @@ output <- list(
     group_by(id) %>%
     mutate(result_degauss = row_number()) %>%
     filter(precision_degauss != 'zip'),
-    nominatim = readxl::read_excel('data/clad_omop_simulated_output_4.xlsx', sheet = 'nominatim_responses')  %>% 
+    nominatim = readxl::read_excel('data/v1/clad_omop_simulated_output_4.xlsx', sheet = 'nominatim_responses')  %>% 
     transmute(
       id, 
       type_gc = geo_type,
@@ -91,7 +91,7 @@ compare <- compare %>% mutate(
     location_source_value = toupper(location_source_value)
   ) 
 
-write_csv(compare, 'data/geocode_comparison_clean.csv')
+write_csv(compare, 'data/v1/geocode_comparison_clean.csv')
 ```
 
 ## Data Description
@@ -249,7 +249,7 @@ ggplot(filter(compare, geocoder == 'degauss' & precision_degauss != 'zip')) +
   geom_point(aes(x = score_degauss, y = gc_diff_m)) +
   ylim(0, 1000) + 
   facet_wrap(~precision_degauss) +   
-  ylab('Distance from Gold Standard (m)') +   
+  ylab('Distance from Gold Standard (m) - Truncated') +   
   xlab('Geocode Score') + 
   ggtitle("Error vs. Geocode Score", subtitle = "Truncated to 1000 m")
 ```

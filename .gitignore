@@ -4,3 +4,5 @@
 .Ruserdata
 binder.Rproj
 *.html
+.DS_Store
+report/rsconnect
