@@ -1,0 +1,489 @@
+---
+title: "Notional Data Exploration V2"
+format: 
+  html:
+    toc: true
+    df-print: kable
+execute-dir: project
+execute:
+  echo: false
+  warning: false
+---
+
+```{r}
+#| include: false
+
+library(sf)
+library(tidyverse)
+library(mapview)
+library(kableExtra)
+library(glue)
+library(readxl)
+
+theme_set(theme_minimal())
+setwd(here::here())
+
+input <- read_excel('data/v2/DeGaussPostGis_address_for_Geocoders_output_Aug13.xlsx', sheet = 'TrueLatLong') %>%
+  full_join(read_excel('data/v2/DeGaussPostGis_address_for_Geocoders_output_Aug13.xlsx', sheet = 'address_list'), by = 'id')
+
+raw_output <- list(
+  postgis = readxl::read_excel('data/v2/DeGaussPostGis_address_for_Geocoders_output_Aug13.xlsx', sheet = 'postgis_responses', col_types = 'text'),
+  degauss = readxl::read_excel('data/v2/DeGaussPostGis_address_for_Geocoders_output_Aug13.xlsx', sheet = 'degauss_responses', col_types = 'text'),
+  nominatim = readxl::read_excel('data/v2/nominatim_address_for_geocoders_output_Aug13.xlsx', sheet = 'nominatim_responses', col_types = 'text')
+) %>% map(select, -c(matches('json')))
+
+output <- list(
+  postgis = readxl::read_excel('data/v2/DeGaussPostGis_address_for_Geocoders_output_Aug13.xlsx', sheet = 'postgis_responses') %>% 
+    transmute(
+      id, 
+      rating_postgis = rating,
+      lat_gc = geo_lat,
+      long_gc = geo_long
+    ) %>%
+    group_by(id) %>%
+    mutate(result_postgis = row_number()) %>%
+    ungroup(),
+    degauss = readxl::read_excel('data/v2/DeGaussPostGis_address_for_Geocoders_output_Aug13.xlsx', sheet = 'degauss_responses') %>% 
+    transmute(
+      id, 
+      score_degauss = geo_score,
+      precision_degauss = geo_precision,
+      lat_gc = geo_lat,
+      long_gc = lon
+    ) %>%
+    group_by(id) %>%
+    mutate(result_degauss = row_number())  %>%
+    ungroup()%>%
+    filter(precision_degauss != 'zip'),
+    nominatim = readxl::read_excel('data/v2/nominatim_address_for_geocoders_output_Aug13.xlsx', sheet = 'nominatim_responses')  %>% 
+    transmute(
+      id, 
+      type_gc = geo_type,
+      lat_gc = as.numeric(geo_lat),
+      long_gc = as.numeric(geo_long),
+    ) %>%
+    group_by(id) %>%
+    mutate(result_nominatim = row_number()) %>%
+    ungroup()
+) %>%
+  map(st_as_sf, coords = c('long_gc', 'lat_gc'), crs = 4326, remove = FALSE, na.fail = FALSE)
+
+output_long <- output %>% 
+  bind_rows(.id = "geocoder") 
+compare <- input %>%
+  transmute(
+    id, 
+    #state_abbr, 
+    #address_type, 
+    location_source_value = str_replace_all(URLdecode(address), '\\+', ' '), 
+    lat_input = True_Latitude, 
+    long_input = True_Longitude
+  ) %>% 
+  expand_grid(geocoder = c('postgis', 'degauss', 'nominatim')) %>% 
+  left_join(output_long, by = c('id', 'geocoder')) %>% 
+  mutate(failure = is.na(lat_gc) | is.na(long_gc)) %>% 
+  arrange(id, geocoder)
+
+compare$geometry_true <- st_as_sf(as.data.frame(compare), coords = c("long_input","lat_input"), crs = 4326)$geometry
+
+compare <- compare %>% mutate(
+    gc_diff_m = as.numeric(st_distance(geometry, geometry_true, by_element = TRUE)),
+    location_source_value = toupper(location_source_value)
+  ) 
+
+write_csv(compare, 'data/v2/geocode_comparison_clean.csv')
+```
+
+## Data Description
+
+### Input
+
+The input data set of 528 addresses contains a variety of public places with verified locations. This new input data set (V2)
+was cleaned up to remove some errors present in the first one (V1) and to add a county name for Nominatim's geocoder. 
+
+##### Sample Input
+
+```{r}
+head(st_drop_geometry(input))
+```
+
+### Output
+
+Input data was geocoded with three different geocoders. Unlike in V1 of this exercise, we included
+a county column for Nominatim (which is required in its spec). 
+
+#### PostGIS
+
+##### Notes
+
+-   Based on US Census TIGER database
+
+-   Contains a "rating" column indicating match confidence.
+
+-   Documentation [here](https://postgis.net/docs/manual-3.4/postgis_installation.html#loading_extras_tiger_geocoder)
+
+##### Sample Output
+
+```{r}
+head(raw_output$postgis)
+```
+
+#### Degauss
+
+##### Notes
+
+-   Contains a "score" rating the confidence in the match, and a "precision" stating which kind of match was found ("street", "range", or "zip"). All "zip" matches were censored.
+
+-   Documentation [here](https://degauss.org/geocoder/)
+
+##### Sample Output
+
+```{r}
+
+head(raw_output$degauss)
+```
+
+#### Nominatim
+
+##### Notes
+
+-   Based on OpenStreetMap database
+
+-   Documentation [here](https://nominatim.org/release-docs/latest/)
+
+##### Sample Output
+
+```{r}
+head(raw_output$nominatim)
+```
+
+## Performance by Geocoder
+
+Each geocoder was given 528 input addresses. 
+
+Degauss and PostGIS still performed notably better than Nominatim on both accuracy and success rate. Similarly to V1 of this exercise, Nominatim failed to return a match much of the time, and when it did, it often returned several matches. In fact, its non-match rate was even worse in this version of the 
+exercise (29% vs 24%). 
+
+_Note: For input addresses that a geocoder assigned multiple matches, the mean error of the matches was used._
+
+```{r}
+gc_summary <- compare %>%
+  group_by(geocoder, id) %>%
+  summarize(
+    gc_diff_m = mean(gc_diff_m),
+    address_gc_count = n(),
+    all_fail = all(isTRUE(failure))
+  ) %>%
+  ungroup() %>% 
+  group_by(geocoder) %>%
+  summarize(
+    `Min` = min(gc_diff_m, na.rm=TRUE), 
+    `Mean` = mean(gc_diff_m, na.rm=TRUE), 
+    `Median` = median(gc_diff_m, na.rm=TRUE), 
+    `Max` = max(gc_diff_m, na.rm=TRUE), 
+    `Multiple` =  glue('{sum(address_gc_count > 1)} ({round(100*sum(address_gc_count > 1)/n())}%)'),
+    `None` = glue('{sum(all_fail)} ({round(100*sum(all_fail)/n())}%)') 
+  ) %>%
+  arrange(geocoder) 
+gc_summary %>%
+  kbl(
+    digits=0, 
+  ) |> 
+  kable_material() %>% 
+  add_header_above(
+    c(" ",
+      "Distance from Gold Standard (m)" = 4,
+      "Matches" = 2
+    ),
+    align = "c"
+    )
+  
+```
+
+```{r}
+ggplot(compare) + 
+  geom_boxplot(aes(x = geocoder, y = gc_diff_m)) +
+  ylim(0, 1000) + 
+  ylab('Distance from Gold Standard (m) - Truncated') +   
+  xlab('Geocoder') +
+  ggtitle("Error by Geocoder", subtitle = "Error Truncated to 1000m")
+```
+
+## Geocode Confidence Ratings
+
+Two of the geocoders, PostGIS, and Degauss, provide some diagnostic information about their confidence in the geocode. We would like to know if those are actually predictive of the geocode's accuracy. 
+
+_Note: My interpretation of these results is unchanged from V1._
+
+### PostGIS
+
+PostGIS provides a numerical rating from 0 to 100, with zero being the most confident.
+
+Because the distribution of geocoding errors has a long tail, we'll look at the relationship between the rating and the error on both the natural and logarithmic scale. The natural scale is truncated to an error of 1000m in order to see the differences happening at that scale.
+
+```{r}
+ggplot(filter(compare, geocoder == 'postgis')) + 
+  geom_point(aes(x = rating_postgis, y = gc_diff_m)) +
+  ylim(0, 1000) + 
+  ylab('Distance from Gold Standard (m) - Truncated') +   
+  xlab('Geocode Rating') +
+  ggtitle("Error vs. Geocode Rating", subtitle = "Error Truncated to 1000 m")
+```
+
+```{r}
+ggplot(filter(compare, geocoder == 'postgis')) + 
+  geom_point(aes(x = rating_postgis, y = gc_diff_m)) +
+  scale_y_continuous(trans = 'log10') +
+  ylab('Distance from Gold Standard (m)') +   
+  xlab('Geocode Rating') + 
+    ggtitle("Error vs. Geocode Rating - Log Scale")
+```
+
+There is not an obvious visual relationship between the geocoding error and the geocode rating. A cursory web search did not reveal a definition for the rating.
+
+### Degauss
+
+Degauss provides a "precision" value ("street", "range", or "zip" in the notional data) and a "score" value. Scores are only comparable within precision groups per the Degauss docs. They define the score as:
+
+> The percentage of text match between the given address and the geocoded result, expressed as a number between 0 and 1. A higher score indicates a closer match.
+
+Again, we'll look at the relationship between the rating and the error on both the natural and logarithmic scale, this time broken out by the geocode precision.
+
+```{r}
+ggplot(filter(compare, geocoder == 'degauss' & precision_degauss != 'zip')) + 
+  geom_point(aes(x = score_degauss, y = gc_diff_m)) +
+  ylim(0, 1000) + 
+  facet_wrap(~precision_degauss) +   
+  ylab('Distance from Gold Standard (m) - Truncated') +   
+  xlab('Geocode Score') + 
+  ggtitle("Error vs. Geocode Score", subtitle = "Truncated to 1000 m")
+```
+
+```{r}
+ggplot(filter(compare, geocoder == 'degauss' & precision_degauss != 'zip')) + 
+  geom_point(aes(x = score_degauss, y = gc_diff_m)) +
+  scale_y_continuous(trans = 'log10') + 
+  facet_wrap(~precision_degauss) + 
+  ylab('Distance from Gold Standard (m)') +   
+  xlab('Geocode Score') + 
+  ggtitle("Error vs. Geocode Score - Log Scale")
+```
+
+Degauss's geocode score does also not seem to be extremely predictive of the geocoding error. However, "street" precision does have more error than "range" precision, as would be expected. There does appear to be a relationship on the log scale between geocode score and geocode error within the "street" precision type (r² = 0.34), but not a very strong one. 
+
+
+### Nominatim
+
+Nominatim results did not include any sort of confidence score to evaluate.
+
+### Comparing Scores Among Geocoders
+
+Let's see if we can rank geocoder confidence ratings among all the geocoders. In this case, we will break PostGIS confidence into three bins: "best" (confidence = 0), "good" (0 < confidence <= 10), and "bad" (confidence > 10). Approximately half of the PostGIS geocodes were assigned "best". We will use Degauss's "precision" variable to divide those results (still not accepting a "zip" result), and not divide Nominatim at all. 
+
+We also throw out any multiple geocodes returned here. 
+
+```{r}
+compare_w_unified_confidence <- compare %>% 
+  mutate(
+    unified_confidence = paste0(geocoder, ' ', coalesce(precision_degauss, case_when(rating_postgis == 0 ~ 'best', rating_postgis <= 10 ~ 'good', rating_postgis > 10 ~ 'bad'), ''))
+  ) %>% 
+  filter(!is.na(gc_diff_m)) 
+
+gc_summary <- compare_w_unified_confidence %>%
+  group_by(unified_confidence, id) %>%
+  filter(n() == 1) %>% 
+  summarize(
+    gc_diff_m = mean(gc_diff_m),
+    address_gc_count = n(),
+    all_fail = all(isTRUE(failure))
+  ) %>%
+  ungroup() %>% 
+  group_by(unified_confidence) %>%
+  summarize(
+    `N` = n(),
+    `Min` = min(gc_diff_m, na.rm=TRUE), 
+    `Mean` = mean(gc_diff_m, na.rm=TRUE), 
+    `Median` = median(gc_diff_m, na.rm=TRUE), 
+    `Max` = max(gc_diff_m, na.rm=TRUE), 
+    `Multiple` =  glue('{sum(address_gc_count > 1)} ({round(100*sum(address_gc_count > 1)/n())}%)'),
+    `None` = glue('{sum(all_fail)} ({round(100*sum(all_fail)/n())}%)') 
+  ) %>%
+  arrange(desc(Mean)) 
+gc_summary %>%
+  kbl(
+    digits=0, 
+  ) |> 
+  kable_material() %>% 
+  add_header_above(
+    c(" ",
+      "N" = 1,
+      "Distance from Gold Standard (m)" = 4,
+      "Matches" = 2
+    ),
+    align = "c"
+    )
+
+ggplot(compare_w_unified_confidence) + 
+  geom_boxplot(aes(x = unified_confidence, y = gc_diff_m)) +
+  ylim(0, 1000) + 
+  ylab('Distance from Gold Standard (m) - Truncated') +   
+  xlab('Geocoder and Confidence Rating') +
+  ggtitle("Error by Geocoder", subtitle = "Error Truncated to 1000m")
+```
+
+
+## Multiple Results
+
+PostGIS only ever returned a single response.
+
+Degauss returns multiple results when their geocode score is tied. This occurred in 13 locations (versus 9 in V1).
+
+Nominatim is much more likely to return multiple results, and does not provide an obvious way to rank them. This was unchanged by adding the county 
+into the input. 
+
+### Degauss
+
+Of the 13 addresses for which Degauss returned multiple tied geocodes, only one address had more than two geocodes. Again, only a single location returned more than two geocodes. 
+
+Setting aside the single case where Degauss returned more than two results, let's look at how the geocodes relate to each other. I also include the geocoding error for each location, the geocoding error for the centroid of the two locations, and the geocoding error of PostGIS for comparison. 
+
+```{r}
+opts <- options(knitr.kable.NA = "No Match")
+compare %>%
+  filter(geocoder == 'degauss') %>%
+  group_by(geocoder, id) %>%
+  filter(n() == 2) %>%
+  transmute(id, location_source_value, geometry, geometry_true, i = paste0('geometry_', row_number())) %>%
+  pivot_wider(names_from = i, values_from = geometry) %>%
+  ungroup() %>% 
+  left_join(filter(compare, geocoder == 'postgis') %>% select(id, `PostGIS Geocode Error (m)` = gc_diff_m), by = 'id') %>% 
+  transmute(
+    id,
+    `Address` = location_source_value,
+    `Distance between Geocodes (m)` = as.numeric(st_distance(geometry_1, geometry_2, by_element = TRUE)),
+    `Geocode 1 Error (m)` = as.numeric(st_distance(geometry_1, geometry_true, by_element = TRUE)), 
+    `Geocode 2 Error` = as.numeric(st_distance(geometry_2, geometry_true, by_element = TRUE)), 
+    `Centroid Error (m)` = as.numeric(st_distance(
+      st_centroid(
+        st_union(geometry_1, geometry_2)
+      ), 
+      geometry_true, 
+      by_element = TRUE)),
+    `PostGIS Geocode Error (m)`
+  ) %>% 
+  kbl(
+    digits=0
+  ) 
+    
+```
+
+It seems reasonable to either pick the centroid of ties, or pick one at random. Or a tied result could be a cue for us to fall back on another geocoder.
+
+### Nominatim
+
+As mentioned above, Nominatim still returned multiple results much of the time, and it does not provide any way to rank their accuracy.
+
+Here are the three worst cases of Nominatim geocodes (as measured by the area of by the polygon they form). The "true" location is shown as a large blue circle.
+
+The very worst cases are less bad than in V1 (likely owing to Brian and Uma's work to produce cleaner input data). This time, we see in all three 
+that Nominatim has spread out its guesses widely along a single roadway. 
+
+```{r}
+options(opts)
+
+baddies <- output_long %>% 
+  filter(geocoder == 'nominatim') %>% 
+  group_by(geocoder, id) %>% 
+  summarize(geometry = st_union(geometry)) %>% 
+  ungroup() %>% 
+  st_as_sf() %>% 
+  st_convex_hull() %>% 
+  filter(as.numeric(st_area(geometry)) > 0) %>% 
+  arrange(desc(st_area(geometry))) %>% 
+  head(n=3) %>% 
+  inner_join(input, by = 'id')
+
+baddies <- compare %>% 
+  filter(id %in% baddies$id) %>%
+  group_by(id) %>%
+  group_split()
+```
+
+#### `r unique(baddies[[1]]$location_source_value)`
+
+```{r}
+mapview(baddies[[1]]$geometry_true, cex = 10) + 
+mapview(st_as_sf(baddies[[1]]), zcol = 'geocoder', layer.name = 'Geocoder') 
+```
+
+#### `r unique(baddies[[2]]$location_source_value)`
+
+```{r}
+mapview(baddies[[2]]$geometry_true, cex = 10) + 
+mapview(st_as_sf(baddies[[2]]), zcol = 'geocoder', layer.name = 'Geocoder') 
+```
+
+#### `r unique(baddies[[3]]$location_source_value)`
+
+```{r}
+mapview(baddies[[3]]$geometry_true, cex = 10) + 
+mapview(st_as_sf(baddies[[3]]), zcol = 'geocoder', layer.name = 'Geocoder') 
+```
+
+
+
+## Combining Results from Multiple Geocoders
+
+### Non-matches
+
+Do addresses that don't get matched in one geocoder generally also not get matched
+in the others?
+
+Since PostGIS never fails to match, we can only compare Degauss (which rarely fails)
+and Nominatim (which fails much of the time). 
+
+
+
+```{r}
+compare %>%
+  group_by(geocoder, id) %>%
+  summarize(
+    address_gc_count = n(),
+    all_fail = all(isTRUE(failure)),
+    .groups = 'drop'
+  ) %>%
+  pivot_wider(names_from = geocoder, values_from = c(address_gc_count, all_fail)) %>%
+  select(all_fail_nominatim, all_fail_degauss) %>%
+  table() 
+```
+
+It's a bit hard to make a conclusion since the number of failures is so 
+different between the two, but I don't think we can say that they generally
+both fail together. 
+
+### Bad Matches
+
+However, we can evaluate whether error is correlated for all three geocoders. Again we'll take
+the mean of the errors when multiple results are returned. 
+
+
+```{r}
+compare %>%
+  group_by(geocoder, id) %>%
+  summarize(
+    gc_diff_m = mean(gc_diff_m),
+    .groups = 'drop'
+  ) %>% 
+  
+```
+
+The bottom line is that Nominatim's performance did not change appreciably. Brian, Uma, and Josh's data cleaning did appear to fix the egregiously bad estimates we saw last time, but even with county, Nominatim still frequently fails to return a match (24%) or returns multiple unranked matches (29%).
+
+I might recommend dropping Nominatim, especially if computation time is a factor. I'd also recommend trying two or three different strategies to combine or rank the remaining two geocodes using this data set, then evaluating them on a new data set of dummy locations (preferably residential, but we could also use the public reference data set). 
+E.g.
+
+A: Taking the centroid of Degauss and PostGIS when both results exist and they are close enough together (for some reasonable value of close enough)
+
+B: Preferentially using Degauss (which performed best in both test data sets) when possible, and using PostGIS as a fallback. 
+
+I'm happy to do this testing or to hand off to someone else. 

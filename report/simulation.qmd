@@ -1,0 +1,270 @@
+---
+title: "Misclassification Simulation"
+format: 
+  html:
+    toc: true
+    df-print: kable
+execute-dir: project
+execute:
+  echo: false
+  warning: false
+---
+
+In order to inform our strategy for using multiple geocoders, we will simulate
+the process of assigning a SES measure to each address by Census tract, and 
+assess any misclassification. 
+
+```{r}
+#| include: false
+
+library(tidyverse)
+library(tigris)
+library(sf)
+
+# Pull Previously generated comparison data set
+gcs <- read_csv('../data/v2/geocode_comparison_clean.csv')
+gcs <- st_as_sf(gcs, coords = c('long_gc', 'lat_gc'), crs = 'WGS84', na.fail = FALSE)
+gcs$geometry_true <- st_as_sf(as.data.frame(gcs), coords = c("long_input","lat_input"), crs = 'WGS84', na.fail = FALSE)$geometry
+
+# Download 2020 Census Tracts (exclude FIPS 74 call bc Midway has no tracts)
+tr <- map(setdiff(unique(fips_codes$state_code), '74'), tracts, year = 2020, cb = FALSE, progress_bar = FALSE) %>% 
+  bind_rows() %>% 
+  select(GEOID) %>%
+  st_transform('WGS84')
+
+# Find Tracts for GC and True locations
+gcs <- st_set_geometry(gcs, 'geometry_true')
+gcs <- st_join(gcs, tr) %>% rename(tract_geoid_true = GEOID)
+gcs <- st_set_geometry(gcs, 'geometry') 
+gcs <- st_join(gcs, tr) %>% rename(tract_geoid_gc = GEOID)
+```
+
+### Strategy A1: Use the Single Best Available GC
+
+Accept the first acceptable geocode in this order:
+
+1. PostGIS with confidence = 0 
+2. Degauss with precision "range" (N = 1)
+3. PostGIS with confidence <= 10
+4. Nominatim (N = 1)
+5. Degauss with precision "street" (N = 1)
+6. PostGIS with confidence > 10
+
+
+
+```{r}
+gcs <- gcs %>% 
+  group_by(geocoder, id) %>%
+  mutate(
+    rank = case_when(
+      n() == 1 & geocoder == 'postgis' & rating_postgis == 0 ~ 1L,
+      n() == 1 & geocoder == 'degauss' & precision_degauss == 'range' ~ 2L,
+      n() == 1 & geocoder == 'postgis' & rating_postgis <= 10 ~ 3L,
+      n() == 1 & geocoder == 'nominatim' ~ 4L,
+      n() == 1 & geocoder == 'degauss' & precision_degauss == 'street' ~ 5L,
+      n() == 1 & geocoder == 'postgis' & rating_postgis > 10 ~ 6L,
+      TRUE ~ Inf
+    )
+  )
+
+strategy_a <- gcs %>% 
+  filter(!is.na(tract_geoid_gc)) %>% 
+  group_by(id) %>%
+  filter(rank == min(rank))
+
+strategy_a %>% 
+  st_drop_geometry() %>% 
+  group_by(rank) %>% 
+  summarize(
+    `N` = n(),
+    `Percent Tracts ID'ed` = sum(tract_geoid_true == tract_geoid_gc, na.rm=TRUE)/n(),
+    `Percent Tracts Misclassified` = sum(tract_geoid_true != tract_geoid_gc, na.rm=TRUE)/n()
+)
+```
+
+Total
+```{r}
+strategy_a %>% 
+  ungroup() %>%
+  st_drop_geometry() %>% 
+  summarize(
+    ` ` = "Total",
+    `N` = n(),
+    `Percent Tracts ID'ed` = 100*sum(tract_geoid_true == tract_geoid_gc, na.rm=TRUE)/n(),
+    `Percent Tracts Misclassified` = 100*sum(tract_geoid_true != tract_geoid_gc, na.rm=TRUE)/n()
+  ) %>%
+  kbl(
+    digits=0, 
+  ) |> 
+  kable_material() %>% 
+  add_header_above(
+    c(" ",
+      " ",
+      "Tracts" = 2
+    ),
+    align = "c"
+    ) 
+
+```
+
+### Strategy A2: Use the Single Best Available GC (No Nominatim)
+
+To simplify implementation, we can exclude the worst performing geocoder and compare. The results to those above.
+
+1. PostGIS with confidence = 0 
+2. Degauss with precision "range" (N = 1)
+3. PostGIS with confidence <= 10
+<strikethrough>4. Nominatim</strikethrough> (N = 1)
+5. Degauss with precision "street" (N = 1)
+6. PostGIS with confidence > 10
+
+
+```{r}
+
+strategy_a2 <- gcs %>% 
+  filter(rank != 4) %>% 
+  filter(!is.na(tract_geoid_gc)) %>% 
+  group_by(id) %>%
+  filter(rank == min(rank))
+
+strategy_a2 %>% 
+  st_drop_geometry() %>% 
+  group_by(rank) %>% 
+  summarize(
+    `N` = n(),
+    `Percent Tracts ID'ed` = 100*sum(tract_geoid_true == tract_geoid_gc, na.rm=TRUE)/n(),
+    `Percent Tracts Misclassified` = 100*sum(tract_geoid_true != tract_geoid_gc, na.rm=TRUE)/n()
+  ) %>%
+  kbl(
+    digits=0, 
+  ) |> 
+  kable_material() %>% 
+  add_header_above(
+    c(" ",
+      " ",
+      "Tracts" = 2
+    ),
+    align = "c"
+    )
+```
+
+Total
+```{r}
+strategy_a2 %>% 
+  ungroup() %>%
+  st_drop_geometry() %>% 
+  summarize(
+    ` ` = "Total",
+    `N` = n(),
+    `Percent Tracts ID'ed` = 100*sum(tract_geoid_true == tract_geoid_gc, na.rm=TRUE)/n(),
+    `Percent Tracts Misclassified` = 100*sum(tract_geoid_true != tract_geoid_gc, na.rm=TRUE)/n()
+  ) %>%
+  kbl(
+    digits=0, 
+  ) |> 
+  kable_material() %>% 
+  add_header_above(
+    c(" ",
+      " ",
+      "Tracts" = 2
+    ),
+    align = "c"
+    ) 
+
+```
+
+### Strategy B: Use All Acceptable GCs
+
+Take the centroid of all "acceptable" geocodes. We see a major drop-off in performance after 
+item 4 above, so "acceptable" will be defined as any of:
+
+1. PostGIS with confidence = 0 
+2. Degauss with precision "range" (N = 1)
+3. PostGIS with confidence <= 10 
+4. Nominatim (N = 1)
+
+```{r}
+gcs_centroid <- gcs %>% 
+  filter(!st_is_empty(geometry)) %>% 
+  filter(rank <= 4) %>% 
+  select(-tract_geoid_gc) %>% 
+  st_set_geometry('geometry') %>% 
+  group_by(id, tract_geoid_true) %>%
+  summarize(
+    spread = max(as.numeric(st_distance(geometry))),
+    n_pts = n(),
+    ranks = list(rank),
+    geometry = st_centroid(st_combine(geometry))
+  ) %>% 
+  ungroup() %>% 
+  st_join(tr) %>%
+  rename(tract_geoid_gc = GEOID) 
+
+
+gcs_centroid %>% 
+  st_drop_geometry() %>% 
+  summarize(
+    `N` = n(),
+    `Percent Tracts ID'ed` = 100*sum(tract_geoid_true == tract_geoid_gc, na.rm=TRUE)/n(),
+    `Percent Tracts Misclassified` = 100*sum(tract_geoid_true != tract_geoid_gc, na.rm=TRUE)/n()
+  ) %>%
+  kbl(
+    digits=0, 
+  ) |> 
+  kable_material()
+```
+
+```
+
+### Strategy C1: Use PostGIS Only
+
+
+```{r}
+gcs %>% 
+  st_drop_geometry() %>% 
+  filter(geocoder == 'postgis') %>% 
+  summarize(
+    `N` = n(),
+    `Percent Tracts ID'ed` = 100*sum(tract_geoid_true == tract_geoid_gc, na.rm=TRUE)/n(),
+    `Percent Tracts Misclassified` = 100*sum(tract_geoid_true != tract_geoid_gc, na.rm=TRUE)/n()
+  ) %>%
+  kbl(
+    digits=0, 
+  ) |> 
+  kable_material()
+
+```
+
+
+### Strategy C2: Use Degauss Only
+
+Find centroid of nearby (< 100m) multiples, and exclude multiples further away. 
+
+```{r}
+gcs_degauss <- gcs %>% 
+  filter(!st_is_empty(geometry)) %>% 
+  filter(geocoder == 'degauss') %>% 
+  select(-tract_geoid_gc) %>% 
+  st_set_geometry('geometry') %>% 
+  group_by(id, tract_geoid_true) %>%
+  summarize(
+    spread = max(as.numeric(st_distance(geometry))),
+    geometry = st_centroid(st_combine(geometry))
+  ) %>% 
+  ungroup() %>% 
+  filter(spread < 100) %>% 
+  st_join(tr) %>%
+  rename(tract_geoid_gc = GEOID) 
+
+gcs_degauss %>% 
+  st_drop_geometry() %>% 
+  summarize(
+    `N` = n(),
+    `Percent Tracts ID'ed` = 100*sum(tract_geoid_true == tract_geoid_gc, na.rm=TRUE)/n(),
+    `Percent Tracts Misclassified` = 100*sum(tract_geoid_true != tract_geoid_gc, na.rm=TRUE)/n()
+  ) %>%
+  kbl(
+    digits=0, 
+  ) |> 
+  kable_material()
+```
